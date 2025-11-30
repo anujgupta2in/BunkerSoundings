@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NaviSound Calculator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- html2pdf for PDF generation -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <!-- SheetJS (xlsx) for Excel generation -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+      body { font-family: 'Inter', sans-serif; background-color: #f1f5f9; }
+
+      /* Critical styles for printing/PDF generation */
+      @media print {
+        body * {
+          visibility: hidden;
+        }
+        #report-content, #report-content * {
+          visibility: visible;
+        }
+        #report-content {
+          position: absolute;
+          left: 0;
+          top: 0;
+          width: 100%;
+          margin: 0;
+          padding: 20px;
+          background: white !important;
+          overflow: visible !important;
+        }
+        /* Hide buttons and scrollbars during print */
+        .no-print, header, .fixed {
+          display: none !important;
+        }
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react/": "https://aistudiocdn.com/react@^19.2.0/",
+    "react": "https://aistudiocdn.com/react@^19.2.0",
+    "lucide-react": "https://aistudiocdn.com/lucide-react@^0.555.0",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
+    "jspdf": "https://aistudiocdn.com/jspdf@^3.0.4",
+    "xlsx": "https://aistudiocdn.com/xlsx@^0.18.5",
+    "jspdf-autotable": "https://aistudiocdn.com/jspdf-autotable@^5.0.2"
+  }
+}
+</script>
+</head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>
