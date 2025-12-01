@@ -105,7 +105,7 @@ const App: React.FC = () => {
             </div>
             <div>
               <h1 className="text-xl font-bold tracking-tight">
-                NaviSound<span className="text-blue-400">.Pro</span>
+                Bunkersoundings<span className="text-blue-400"></span>
               </h1>
               <p className="text-[10px] text-slate-400 uppercase tracking-widest font-medium">
                 Ship Stability &amp; Sounding

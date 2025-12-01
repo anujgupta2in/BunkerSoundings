@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { X, FileText, Download } from 'lucide-react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -14,6 +14,27 @@ interface ReportViewProps {
   onClose: () => void;
 }
 
+// helper to format numbers
+const fmt = (v: number | null | undefined, decimals = 2) =>
+  v == null || !Number.isFinite(v) ? '' : v.toFixed(decimals);
+
+type Row = {
+  tankId: string;
+  sNo: number;
+  tankName: string;
+  capacity: number | null;
+  maxSounding: number | null;
+  sounding: number | null;
+  ullage: number | null;
+  volume: number | null;
+  temperature: number | null;
+  sg15: number | null;
+  sgCorrect: number | null;
+  mt: number | null;
+  presentPct: number | null;
+  remark: string | null;
+};
+
 const ReportView: React.FC<ReportViewProps> = ({
   drafts,
   tanks,
@@ -22,6 +43,15 @@ const ReportView: React.FC<ReportViewProps> = ({
   reportDate,
   onClose,
 }) => {
+  // manual log book & general remarks
+  const [hfoLogInput, setHfoLogInput] = useState<string>('');
+  const [mgoLogInput, setMgoLogInput] = useState<string>('');
+  const [generalRemarks, setGeneralRemarks] = useState<string>('');
+
+  // per-tank remarks (editable in table)
+  const [remarks, setRemarks] = useState<{ [tankId: string]: string }>({});
+
+  // draft averages
   const draftAverages = useMemo(() => {
     const aftAvg = (drafts.aftP + drafts.aftS) / 2;
     const midAvg = (drafts.midP + drafts.midS) / 2;
@@ -29,63 +59,145 @@ const ReportView: React.FC<ReportViewProps> = ({
     return { aftAvg, midAvg, foreAvg };
   }, [drafts]);
 
-  const foTanks = useMemo(
+  // split tanks by category
+  const hfoTanks = useMemo(
     () => tanks.filter(t => t.category === 'Fuel Oil'),
     [tanks]
   );
-  const doTanks = useMemo(
+  const mgoTanks = useMemo(
     () => tanks.filter(t => t.category === 'Diesel Oil'),
     [tanks]
   );
 
-  const buildRows = (list: TankData[]) =>
+  // ---- Build rows (auto capacity, max sounding, ullage, present %, remarks) ----
+  const buildRows = (list: TankData[]): Row[] =>
     list.map((tank, index) => {
       const res = results[tank.id];
+
+      const capacity: number | null =
+        typeof tank.maxVolume === 'number' ? tank.maxVolume : null;
+
+      const maxSounding: number | null =
+        typeof tank.ullageReference === 'number'
+          ? tank.ullageReference
+          : null;
+
+      const sounding = res?.measuredSounding ?? null;
+
+      // ULLAGE = Max HM - Sounding
+      const ullage =
+        maxSounding != null && sounding != null
+          ? maxSounding - sounding
+          : null;
+
+      const volume = res?.volume ?? null;
+      const temperature = res?.temperature ?? null;
+
+      const sg15 =
+        typeof (res as any)?.sgAt15 === 'number'
+          ? (res as any).sgAt15
+          : res?.specificGravity ?? null;
+
+      const sgCorrect =
+        typeof (res as any)?.correctedSpecificGravity === 'number'
+          ? (res as any).correctedSpecificGravity
+          : res?.specificGravity ?? null;
+
+      const mt = res?.weight ?? null;
+
+      // PRESENT % = Volume / Capacity * 100
+      const presentPct =
+        capacity != null && capacity > 0 && volume != null
+          ? (volume / capacity) * 100
+          : null;
+
+      const anyTank = tank as any;
+
+      // precedence: manual remark (state) → tank.remark → result.remark
+      const manualRemark = remarks[tank.id];
+      const remarkFromTank =
+        typeof anyTank.remark === 'string' ? anyTank.remark : null;
+      const remarkFromResult =
+        (res as any)?.remark && typeof (res as any).remark === 'string'
+          ? (res as any).remark
+          : null;
+
+      const remark: string | null =
+        manualRemark != null
+          ? manualRemark
+          : remarkFromTank ?? remarkFromResult;
+
       return {
+        tankId: tank.id,
         sNo: index + 1,
-        tank: tank.name ?? tank.id,
-        sounding: res?.measuredSounding ?? null,
-        correctedSounding: res?.correctedSounding ?? null,
-        volume: res?.volume ?? null,
-        temperature: res?.temperature ?? null,
-        sg: res?.specificGravity ?? null,
-        correctedSg: (res as any)?.correctedSpecificGravity ?? null, // if you have this
-        weight: res?.weight ?? null,
+        tankName: tank.name ?? tank.id,
+        capacity,
+        maxSounding,
+        sounding,
+        ullage,
+        volume,
+        temperature,
+        sg15,
+        sgCorrect,
+        mt,
+        presentPct,
+        remark,
       };
     });
 
-  const foRows = buildRows(foTanks);
-  const doRows = buildRows(doTanks);
+  const hfoRows = buildRows(hfoTanks);
+  const mgoRows = buildRows(mgoTanks);
 
-  const sumTotals = (rows: typeof foRows) =>
+  const sumTotals = (rows: Row[]) =>
     rows.reduce(
       (acc, r) => {
+        if (r.capacity != null) acc.totalCapacity += r.capacity;
         if (r.volume != null) acc.totalVolume += r.volume;
-        if (r.weight != null) acc.totalWeight += r.weight;
+        if (r.mt != null) acc.totalMt += r.mt;
         return acc;
       },
-      { totalVolume: 0, totalWeight: 0 }
+      { totalCapacity: 0, totalVolume: 0, totalMt: 0 }
     );
 
-  const foTotals = sumTotals(foRows);
-  const doTotals = sumTotals(doRows);
+  const hfoTotals = sumTotals(hfoRows);
+  const mgoTotals = sumTotals(mgoRows);
 
-  const fmt = (v: number | null, decimals: number = 2) =>
-    v == null || !Number.isFinite(v) ? '' : v.toFixed(decimals);
+  // parse manual log book values (if given)
+  const parsedHfoLog =
+    hfoLogInput.trim() !== '' && !Number.isNaN(Number(hfoLogInput))
+      ? Number(hfoLogInput)
+      : null;
 
-  // ---------- PDF: one doc, all tables ----------
+  const parsedMgoLog =
+    mgoLogInput.trim() !== '' && !Number.isNaN(Number(mgoLogInput))
+      ? Number(mgoLogInput)
+      : null;
+
+  // Log = manual (if entered) else auto total
+  const hfoLog = parsedHfoLog ?? hfoTotals.totalMt;
+  const hfoDiff = hfoTotals.totalMt - hfoLog;
+
+  const mgoLog = parsedMgoLog ?? mgoTotals.totalMt;
+  const mgoDiff = mgoTotals.totalMt - mgoLog;
+
+  // ---------------- PDF EXPORT (one doc, HFO + MGO) ----------------
   const handleExportPDF = () => {
     const doc = new jsPDF('p', 'mm', 'a4');
-    const title = `Bunker Sounding Report - ${vesselName || 'Vessel'}`;
-
     doc.setFontSize(14);
-    doc.text(title, 14, 15);
-    doc.setFontSize(10);
-    doc.text(`Date: ${reportDate || ''}`, 14, 21);
+    doc.setTextColor(0, 0, 0);
+    doc.text(
+      `Bunker Report - ${vesselName || 'Vessel'}`,
+      105,
+      12,
+      { align: 'center' }
+    );
 
-    // Drafts
+    doc.setFontSize(9);
+    doc.text(`Date: ${reportDate || ''}`, 14, 18);
+
+    // Drafts block
     autoTable(doc, {
-      startY: 26,
+      startY: 22,
       head: [['', 'Aft', 'Midship', 'Fore']],
       body: [
         ['Draft P', drafts.aftP, drafts.midP, drafts.foreP],
@@ -97,103 +209,167 @@ const ReportView: React.FC<ReportViewProps> = ({
           draftAverages.foreAvg.toFixed(2),
         ],
       ],
-      styles: { fontSize: 8 },
-      headStyles: { fillColor: [230, 230, 230] },
+      styles: { fontSize: 7, textColor: [40, 40, 40] },
+      headStyles: {
+        fillColor: [210, 210, 210],
+        textColor: [0, 0, 0],
+        fontStyle: 'bold',
+      },
     });
 
-    let y = (doc as any).lastAutoTable.finalY + 8;
+    let y = (doc as any).lastAutoTable.finalY + 6;
 
-    // FO Tanks
-    doc.setFontSize(10);
-    doc.text('FO Tanks', 14, y);
+    // HFO TABLE
+    doc.setFontSize(11);
+    doc.text('H.F.O', 105, y, { align: 'center' });
     y += 4;
 
     autoTable(doc, {
       startY: y,
       head: [[
-        'S.No',
-        'Tank',
-        'Sounding (m)',
-        'Corrected Sounding',
+        'TANK No.',
+        'CAPACITY (m³)',
+        'Max HM',
+        'Sounding',
+        'Ullage',
         'm³',
-        'Temp (°C)',
-        'Specific Gravity',
-        'Corrected S.G.',
+        'temp °C',
+        'S.G@15°C',
+        'Correct',
         'M.T.',
+        'PRESENT %',
+        'REMARK',
       ]],
-      body: foRows.map(r => [
-        r.sNo,
-        r.tank,
-        fmt(r.sounding, 3),
-        fmt(r.correctedSounding, 3),
+      body: hfoRows.map(r => [
+        r.tankName,
+        fmt(r.capacity, 0),
+        fmt(r.maxSounding, 2),
+        fmt(r.sounding, 2),
+        fmt(r.ullage, 2),
         fmt(r.volume, 2),
         fmt(r.temperature, 1),
-        fmt(r.sg, 4),
-        fmt(r.correctedSg, 4),
-        fmt(r.weight, 2),
+        fmt(r.sg15, 4),
+        fmt(r.sgCorrect, 4),
+        fmt(r.mt, 2),
+        r.presentPct != null ? `${fmt(r.presentPct, 2)}%` : '',
+        r.remark ?? '',
       ]),
       foot: [[
-        '',
-        '',
-        '',
         'TOTAL',
-        fmt(foTotals.totalVolume, 2),
+        fmt(hfoTotals.totalCapacity, 0),
         '',
         '',
         '',
-        fmt(foTotals.totalWeight, 2),
+        fmt(hfoTotals.totalVolume, 2),
+        '',
+        '',
+        '',
+        fmt(hfoTotals.totalMt, 2),
+        '',
+        '',
       ]],
-      styles: { fontSize: 8 },
-      headStyles: { fillColor: [240, 240, 240] },
-      footStyles: { fillColor: [220, 220, 220], fontStyle: 'bold' },
+      styles: { fontSize: 7, textColor: [40, 40, 40] },
+      headStyles: {
+        fillColor: [200, 200, 200],
+        textColor: [0, 0, 0],
+        fontStyle: 'bold',
+      },
+      footStyles: {
+        fillColor: [220, 220, 220],
+        fontStyle: 'bold',
+        textColor: [0, 0, 0],
+      },
     });
 
-    y = (doc as any).lastAutoTable.finalY + 8;
+    y = (doc as any).lastAutoTable.finalY + 4;
 
-    // DO Tanks
-    doc.setFontSize(10);
-    doc.text('DO Tanks', 14, y);
+    // HFO Log / Diff
+    doc.setFontSize(8);
+    doc.text(`Total: ${fmt(hfoTotals.totalMt, 3)} MT`, 150, y);
+    y += 4;
+    doc.text(`Log.: ${fmt(hfoLog, 3)} MT`, 150, y);
+    y += 4;
+    doc.text(`Diffo.: ${fmt(hfoDiff, 3)} MT`, 150, y);
+    y += 8;
+
+    // MGO TABLE
+    doc.setFontSize(11);
+    doc.text('M.G.O', 105, y, { align: 'center' });
     y += 4;
 
     autoTable(doc, {
       startY: y,
       head: [[
-        'S.No',
-        'Tank',
-        'Sounding (m)',
-        'Corrected Sounding',
+        'TANK No.',
+        'CAPACITY (m³)',
+        'Max HM',
+        'Sounding',
+        'Ullage',
         'm³',
-        'Temp (°C)',
-        'Specific Gravity',
-        'Corrected S.G.',
+        'temp °C',
+        'S.G@15°C',
+        'Correct',
         'M.T.',
+        'PRESENT %',
+        'REMARK',
       ]],
-      body: doRows.map(r => [
-        r.sNo,
-        r.tank,
-        fmt(r.sounding, 3),
-        fmt(r.correctedSounding, 3),
+      body: mgoRows.map(r => [
+        r.tankName,
+        fmt(r.capacity, 0),
+        fmt(r.maxSounding, 2),
+        fmt(r.sounding, 2),
+        fmt(r.ullage, 2),
         fmt(r.volume, 2),
         fmt(r.temperature, 1),
-        fmt(r.sg, 4),
-        fmt(r.correctedSg, 4),
-        fmt(r.weight, 2),
+        fmt(r.sg15, 4),
+        fmt(r.sgCorrect, 4),
+        fmt(r.mt, 2),
+        r.presentPct != null ? `${fmt(r.presentPct, 2)}%` : '',
+        r.remark ?? '',
       ]),
       foot: [[
-        '',
-        '',
-        '',
         'TOTAL',
-        fmt(doTotals.totalVolume, 2),
+        fmt(mgoTotals.totalCapacity, 0),
         '',
         '',
         '',
-        fmt(doTotals.totalWeight, 2),
+        fmt(mgoTotals.totalVolume, 2),
+        '',
+        '',
+        '',
+        fmt(mgoTotals.totalMt, 2),
+        '',
+        '',
       ]],
-      styles: { fontSize: 8 },
-      headStyles: { fillColor: [240, 240, 240] },
-      footStyles: { fillColor: [220, 220, 220], fontStyle: 'bold' },
+      styles: { fontSize: 7, textColor: [40, 40, 40] },
+      headStyles: {
+        fillColor: [200, 200, 200],
+        textColor: [0, 0, 0],
+        fontStyle: 'bold',
+      },
+      footStyles: {
+        fillColor: [220, 220, 220],
+        fontStyle: 'bold',
+        textColor: [0, 0, 0],
+      },
     });
+
+    y = (doc as any).lastAutoTable.finalY + 4;
+    doc.setFontSize(8);
+    doc.text(`Total: ${fmt(mgoTotals.totalMt, 3)} MT`, 150, y);
+    y += 4;
+    doc.text(`Log.: ${fmt(mgoLog, 3)} MT`, 150, y);
+    y += 4;
+    doc.text(`Diffo.: ${fmt(mgoDiff, 3)} MT`, 150, y);
+    y += 6;
+
+    // General remarks (if any)
+    if (generalRemarks.trim()) {
+      doc.setFontSize(8);
+      doc.text('Remarks:', 14, y);
+      const wrapped = doc.splitTextToSize(generalRemarks, 180);
+      doc.text(wrapped, 32, y);
+    }
 
     const fileName = `bunker-report-${(vesselName || 'vessel').replace(
       /\s+/g,
@@ -202,109 +378,144 @@ const ReportView: React.FC<ReportViewProps> = ({
     doc.save(fileName);
   };
 
-  // ---------- Excel: one sheet, all tables ----------
+  // ---------------- EXCEL EXPORT (one sheet, HFO + MGO) ----------------
   const handleExportExcel = () => {
     const wb = XLSX.utils.book_new();
+    const sheet: (string | number)[][] = [];
 
-    const sheetData: (string | number)[][] = [];
-
-    // Title + header info
-    sheetData.push([`Bunker Sounding Report`]);
-    sheetData.push([
+    // Title and header info
+    sheet.push([`Bunker Report`]);
+    sheet.push([
       'Vessel', vesselName || '',
       '',
       'Date', reportDate || '',
     ]);
-    sheetData.push([]); // blank
+    sheet.push([]);
 
     // Drafts block
-    sheetData.push(['', 'Aft', 'Midship', 'Fore']);
-    sheetData.push(['Draft P', drafts.aftP, drafts.midP, drafts.foreP]);
-    sheetData.push(['Draft S', drafts.aftS, drafts.midS, drafts.foreS]);
-    sheetData.push([
+    sheet.push(['', 'Aft', 'Midship', 'Fore']);
+    sheet.push(['Draft P', drafts.aftP, drafts.midP, drafts.foreP]);
+    sheet.push(['Draft S', drafts.aftS, drafts.midS, drafts.foreS]);
+    sheet.push([
       'Draft Average',
       draftAverages.aftAvg,
       draftAverages.midAvg,
       draftAverages.foreAvg,
     ]);
+    sheet.push([]);
 
-    sheetData.push([]);
-    sheetData.push(['FO Tanks']);
-    sheetData.push([
-      'S.No',
-      'Tank',
-      'Sounding (m)',
-      'Corrected Sounding',
+    // HFO
+    sheet.push(['H.F.O']);
+    sheet.push([
+      'TANK No.',
+      'CAPACITY (m³)',
+      'Max HM',
+      'Sounding',
+      'Ullage',
       'm³',
-      'Temp (°C)',
-      'Specific Gravity',
-      'Corrected S.G.',
+      'temp °C',
+      'S.G@15°C',
+      'Correct',
       'M.T.',
+      'PRESENT %',
+      'REMARK',
     ]);
-    foRows.forEach(r => {
-      sheetData.push([
-        r.sNo,
-        r.tank,
+
+    hfoRows.forEach(r => {
+      sheet.push([
+        r.tankName,
+        r.capacity ?? '',
+        r.maxSounding ?? '',
         r.sounding ?? '',
-        r.correctedSounding ?? '',
+        r.ullage ?? '',
         r.volume ?? '',
         r.temperature ?? '',
-        r.sg ?? '',
-        r.correctedSg ?? '',
-        r.weight ?? '',
+        r.sg15 ?? '',
+        r.sgCorrect ?? '',
+        r.mt ?? '',
+        r.presentPct ?? '',
+        r.remark ?? '',
       ]);
     });
-    sheetData.push([
-      '',
-      '',
-      '',
+
+    sheet.push([
       'TOTAL',
-      foTotals.totalVolume,
+      hfoTotals.totalCapacity,
       '',
       '',
       '',
-      foTotals.totalWeight,
+      hfoTotals.totalVolume,
+      '',
+      '',
+      '',
+      hfoTotals.totalMt,
+      '',
+      '',
     ]);
 
-    sheetData.push([]);
-    sheetData.push(['DO Tanks']);
-    sheetData.push([
-      'S.No',
-      'Tank',
-      'Sounding (m)',
-      'Corrected Sounding',
+    sheet.push([]);
+    sheet.push(['Total (MT)', hfoTotals.totalMt]);
+    sheet.push(['Log. (MT)', hfoLog]);
+    sheet.push(['Diffo. (MT)', hfoDiff]);
+    sheet.push([]);
+
+    // MGO
+    sheet.push(['M.G.O']);
+    sheet.push([
+      'TANK No.',
+      'CAPACITY (m³)',
+      'Max HM',
+      'Sounding',
+      'Ullage',
       'm³',
-      'Temp (°C)',
-      'Specific Gravity',
-      'Corrected S.G.',
+      'temp °C',
+      'S.G@15°C',
+      'Correct',
       'M.T.',
+      'PRESENT %',
+      'REMARK',
     ]);
-    doRows.forEach(r => {
-      sheetData.push([
-        r.sNo,
-        r.tank,
+
+    mgoRows.forEach(r => {
+      sheet.push([
+        r.tankName,
+        r.capacity ?? '',
+        r.maxSounding ?? '',
         r.sounding ?? '',
-        r.correctedSounding ?? '',
+        r.ullage ?? '',
         r.volume ?? '',
         r.temperature ?? '',
-        r.sg ?? '',
-        r.correctedSg ?? '',
-        r.weight ?? '',
+        r.sg15 ?? '',
+        r.sgCorrect ?? '',
+        r.mt ?? '',
+        r.presentPct ?? '',
+        r.remark ?? '',
       ]);
     });
-    sheetData.push([
-      '',
-      '',
-      '',
+
+    sheet.push([
       'TOTAL',
-      doTotals.totalVolume,
+      mgoTotals.totalCapacity,
       '',
       '',
       '',
-      doTotals.totalWeight,
+      mgoTotals.totalVolume,
+      '',
+      '',
+      '',
+      mgoTotals.totalMt,
+      '',
+      '',
     ]);
 
-    const ws = XLSX.utils.aoa_to_sheet(sheetData);
+    sheet.push([]);
+    sheet.push(['Total (MT)', mgoTotals.totalMt]);
+    sheet.push(['Log. (MT)', mgoLog]);
+    sheet.push(['Diffo. (MT)', mgoDiff]);
+    sheet.push([]);
+    sheet.push(['Remarks', generalRemarks || '']);
+
+    const ws = XLSX.utils.aoa_to_sheet(sheet);
     XLSX.utils.book_append_sheet(wb, ws, 'Report');
 
     const fileName = `bunker-report-${(vesselName || 'vessel').replace(
@@ -314,6 +525,7 @@ const ReportView: React.FC<ReportViewProps> = ({
     XLSX.writeFile(wb, fileName);
   };
 
+  // ---------------- RENDER ----------------
   return (
     <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center">
       <div className="bg-white rounded-2xl shadow-2xl w-[95vw] max-w-6xl max-h-[90vh] overflow-hidden flex flex-col">
@@ -325,10 +537,11 @@ const ReportView: React.FC<ReportViewProps> = ({
             </div>
             <div>
               <h2 className="text-lg font-semibold text-slate-900">
-                Bunker Sounding Report
+                Bunker Report
               </h2>
               <p className="text-xs text-slate-500">
-                Vessel: {vesselName || 'N/A'} &nbsp; | &nbsp; Date: {reportDate || 'N/A'}
+                Vessel: {vesselName || 'N/A'} &nbsp; | &nbsp; Date:{' '}
+                {reportDate || 'N/A'}
               </p>
             </div>
           </div>
@@ -360,12 +573,54 @@ const ReportView: React.FC<ReportViewProps> = ({
           </div>
         </div>
 
-        {/* Body – same format as Excel sample, with FO + DO */}
+        {/* Body */}
         <div className="flex-1 overflow-auto px-6 py-4 text-xs">
-          {/* Draft table */}
-          <div className="mb-6">
-            <table className="border border-slate-300 text-xs">
-              <thead>
+          {/* Manual log inputs + general remarks */}
+          <div className="mb-4 flex flex-wrap gap-4 items-end text-[11px]">
+            <div className="flex flex-col">
+              <label className="mb-1 font-semibold text-slate-700">
+                HFO Log Book (MT)
+              </label>
+              <input
+                type="number"
+                step="0.001"
+                value={hfoLogInput}
+                onChange={e => setHfoLogInput(e.target.value)}
+                className="border border-slate-300 rounded px-2 py-1 w-32 text-right"
+                placeholder={hfoTotals.totalMt.toFixed(3)}
+              />
+            </div>
+            <div className="flex flex-col">
+              <label className="mb-1 font-semibold text-slate-700">
+                MGO Log Book (MT)
+              </label>
+              <input
+                type="number"
+                step="0.001"
+                value={mgoLogInput}
+                onChange={e => setMgoLogInput(e.target.value)}
+                className="border border-slate-300 rounded px-2 py-1 w-32 text-right"
+                placeholder={mgoTotals.totalMt.toFixed(3)}
+              />
+            </div>
+            <div className="flex-1 min-w-[200px]">
+              <label className="mb-1 font-semibold text-slate-700">
+                Remarks
+              </label>
+              <textarea
+                rows={2}
+                value={generalRemarks}
+                onChange={e => setGeneralRemarks(e.target.value)}
+                className="w-full border border-slate-300 rounded px-2 py-1"
+                placeholder="Any additional remarks for the report / log book…"
+              />
+            </div>
+          </div>
+
+          {/* Drafts table */}
+          <div className="mb-4">
+            <table className="border border-slate-300 text-[11px]">
+              <thead className="bg-slate-100">
                 <tr>
                   <th className="border border-slate-300 px-2 py-1"></th>
                   <th className="border border-slate-300 px-4 py-1 text-center">
@@ -422,178 +677,259 @@ const ReportView: React.FC<ReportViewProps> = ({
             </table>
           </div>
 
-          {/* FO Tanks */}
+          {/* HFO table */}
           <div className="mb-6">
-            <div className="mb-2 font-semibold text-slate-800 text-xs">
-              FO Tanks
-            </div>
+            <div className="text-center font-bold text-sm mb-1">H.F.O</div>
             <table className="w-full border border-slate-300 text-[11px]">
-              <thead className="bg-slate-100">
+              <thead className="bg-slate-100 text-slate-900">
                 <tr>
-                  <th className="border border-slate-300 px-1 py-1 text-center w-10">
-                    S.No
+                  <th className="border border-slate-300 px-1 py-1 text-center">
+                    TANK No.
                   </th>
                   <th className="border border-slate-300 px-1 py-1 text-center">
-                    Tank
+                    CAPACITY (m³)
                   </th>
                   <th className="border border-slate-300 px-1 py-1 text-center">
-                    Sounding (m)
+                    Max HM
                   </th>
                   <th className="border border-slate-300 px-1 py-1 text-center">
-                    Corrected Sounding
+                    Sounding
+                  </th>
+                  <th className="border border-slate-300 px-1 py-1 text-center">
+                    Ullage
                   </th>
                   <th className="border border-slate-300 px-1 py-1 text-center">
                     m³
                   </th>
                   <th className="border border-slate-300 px-1 py-1 text-center">
-                    Temp (°C)
+                    temp °C
                   </th>
                   <th className="border border-slate-300 px-1 py-1 text-center">
-                    Specific Gravity
+                    S.G@15°C
                   </th>
                   <th className="border border-slate-300 px-1 py-1 text-center">
-                    Corrected Specific Gravity
+                    Correct
                   </th>
                   <th className="border border-slate-300 px-1 py-1 text-center">
                     M.T.
                   </th>
+                  <th className="border border-slate-300 px-1 py-1 text-center">
+                    PRESENT %
+                  </th>
+                  <th className="border border-slate-300 px-1 py-1 text-center">
+                    REMARK
+                  </th>
                 </tr>
               </thead>
               <tbody>
-                {foRows.map(row => (
-                  <tr key={row.sNo}>
-                    <td className="border border-slate-300 px-1 py-1 text-center">
-                      {row.sNo}
+                {hfoRows.map(r => (
+                  <tr key={r.sNo}>
+                    <td className="border border-slate-300 px-1 py-1 text-left">
+                      {r.tankName}
                     </td>
-                    <td className="border border-slate-300 px-1 py-1 text-center">
-                      {row.tank}
+                    <td className="border border-slate-300 px-1 py-1 text-right">
+                      {fmt(r.capacity, 0)}
+                    </td>
+                    <td className="border border-slate-300 px-1 py-1 text-right">
+                      {fmt(r.maxSounding, 2)}
                     </td>
                     <td className="border border-slate-300 px-1 py-1 text-right text-blue-700">
-                      {fmt(row.sounding, 3)}
+                      {fmt(r.sounding, 2)}
                     </td>
                     <td className="border border-slate-300 px-1 py-1 text-right">
-                      {fmt(row.correctedSounding, 3)}
+                      {fmt(r.ullage, 2)}
+                    </td>
+                    <td className="border border-slate-300 px-1 py-1 text-right bg-green-50">
+                      {fmt(r.volume, 2)}
+                    </td>
+                    <td className="border border-slate-300 px-1 py-1 text-right bg-green-50">
+                      {fmt(r.temperature, 1)}
+                    </td>
+                    <td className="border border-slate-300 px-1 py-1 text-right bg-green-50">
+                      {fmt(r.sg15, 4)}
+                    </td>
+                    <td className="border border-slate-300 px-1 py-1 text-right bg-green-50">
+                      {fmt(r.sgCorrect, 4)}
+                    </td>
+                    <td className="border border-slate-300 px-1 py-1 text-right bg-green-50">
+                      {fmt(r.mt, 2)}
                     </td>
                     <td className="border border-slate-300 px-1 py-1 text-right">
-                      {fmt(row.volume, 2)}
+                      {r.presentPct != null ? `${fmt(r.presentPct, 2)}%` : ''}
                     </td>
-                    <td className="border border-slate-300 px-1 py-1 text-right text-blue-700">
-                      {fmt(row.temperature, 1)}
-                    </td>
-                    <td className="border border-slate-300 px-1 py-1 text-right text-blue-700">
-                      {fmt(row.sg, 4)}
-                    </td>
-                    <td className="border border-slate-300 px-1 py-1 text-right">
-                      {fmt(row.correctedSg, 4)}
-                    </td>
-                    <td className="border border-slate-300 px-1 py-1 text-right">
-                      {fmt(row.weight, 2)}
+                    <td className="border border-slate-300 px-1 py-1 text-left">
+                      <input
+                        className="w-full border border-slate-200 rounded px-1 py-0.5 text-[11px]"
+                        value={remarks[r.tankId] ?? ''}
+                        onChange={e =>
+                          setRemarks(prev => ({
+                            ...prev,
+                            [r.tankId]: e.target.value,
+                          }))
+                        }
+                        placeholder=""
+                      />
                     </td>
                   </tr>
                 ))}
                 <tr className="bg-slate-100 font-semibold">
-                  <td className="border border-slate-300 px-1 py-1" colSpan={4}>
+                  <td className="border border-slate-300 px-1 py-1 text-left">
                     TOTAL
                   </td>
                   <td className="border border-slate-300 px-1 py-1 text-right">
-                    {fmt(foTotals.totalVolume, 2)}
+                    {fmt(hfoTotals.totalCapacity, 0)}
                   </td>
                   <td className="border border-slate-300 px-1 py-1" />
                   <td className="border border-slate-300 px-1 py-1" />
                   <td className="border border-slate-300 px-1 py-1" />
                   <td className="border border-slate-300 px-1 py-1 text-right">
-                    {fmt(foTotals.totalWeight, 2)}
+                    {fmt(hfoTotals.totalVolume, 2)}
                   </td>
+                  <td className="border border-slate-300 px-1 py-1" />
+                  <td className="border border-slate-300 px-1 py-1" />
+                  <td className="border border-slate-300 px-1 py-1" />
+                  <td className="border border-slate-300 px-1 py-1 text-right">
+                    {fmt(hfoTotals.totalMt, 2)}
+                  </td>
+                  <td className="border border-slate-300 px-1 py-1" />
+                  <td className="border border-slate-300 px-1 py-1" />
                 </tr>
               </tbody>
             </table>
+
+            {/* HFO total / log / diff */}
+            <div className="mt-2 text-[11px] flex flex-col items-end gap-1">
+              <div> Total: {fmt(hfoTotals.totalMt, 3)} MT</div>
+              <div> Log.: {fmt(hfoLog, 3)} MT</div>
+              <div> Diffo.: {fmt(hfoDiff, 3)} MT</div>
+            </div>
           </div>
 
-          {/* DO Tanks */}
+          {/* MGO table */}
           <div>
-            <div className="mb-2 font-semibold text-slate-800 text-xs">
-              DO Tanks
-            </div>
+            <div className="text-center font-bold text-sm mb-1">M.G.O</div>
             <table className="w-full border border-slate-300 text-[11px]">
-              <thead className="bg-slate-100">
+              <thead className="bg-slate-100 text-slate-900">
                 <tr>
-                  <th className="border border-slate-300 px-1 py-1 text-center w-10">
-                    S.No
+                  <th className="border border-slate-300 px-1 py-1 text-center">
+                    TANK No.
                   </th>
                   <th className="border border-slate-300 px-1 py-1 text-center">
-                    Tank
+                    CAPACITY (m³)
                   </th>
                   <th className="border border-slate-300 px-1 py-1 text-center">
-                    Sounding (m)
+                    Max HM
                   </th>
                   <th className="border border-slate-300 px-1 py-1 text-center">
-                    Corrected Sounding
+                    Sounding
+                  </th>
+                  <th className="border border-slate-300 px-1 py-1 text-center">
+                    Ullage
                   </th>
                   <th className="border border-slate-300 px-1 py-1 text-center">
                     m³
                   </th>
                   <th className="border border-slate-300 px-1 py-1 text-center">
-                    Temp (°C)
+                    temp °C
                   </th>
                   <th className="border border-slate-300 px-1 py-1 text-center">
-                    Specific Gravity
+                    S.G@15°C
                   </th>
                   <th className="border border-slate-300 px-1 py-1 text-center">
-                    Corrected Specific Gravity
+                    Correct
                   </th>
                   <th className="border border-slate-300 px-1 py-1 text-center">
                     M.T.
                   </th>
+                  <th className="border border-slate-300 px-1 py-1 text-center">
+                    PRESENT %
+                  </th>
+                  <th className="border border-slate-300 px-1 py-1 text-center">
+                    REMARK
+                  </th>
                 </tr>
               </thead>
               <tbody>
-                {doRows.map(row => (
-                  <tr key={row.sNo}>
-                    <td className="border border-slate-300 px-1 py-1 text-center">
-                      {row.sNo}
+                {mgoRows.map(r => (
+                  <tr key={r.sNo}>
+                    <td className="border border-slate-300 px-1 py-1 text-left">
+                      {r.tankName}
                     </td>
-                    <td className="border border-slate-300 px-1 py-1 text-center">
-                      {row.tank}
+                    <td className="border border-slate-300 px-1 py-1 text-right">
+                      {fmt(r.capacity, 0)}
+                    </td>
+                    <td className="border border-slate-300 px-1 py-1 text-right">
+                      {fmt(r.maxSounding, 2)}
                     </td>
                     <td className="border border-slate-300 px-1 py-1 text-right text-blue-700">
-                      {fmt(row.sounding, 3)}
+                      {fmt(r.sounding, 2)}
                     </td>
                     <td className="border border-slate-300 px-1 py-1 text-right">
-                      {fmt(row.correctedSounding, 3)}
+                      {fmt(r.ullage, 2)}
+                    </td>
+                    <td className="border border-slate-300 px-1 py-1 text-right bg-green-50">
+                      {fmt(r.volume, 2)}
+                    </td>
+                    <td className="border border-slate-300 px-1 py-1 text-right bg-green-50">
+                      {fmt(r.temperature, 1)}
+                    </td>
+                    <td className="border border-slate-300 px-1 py-1 text-right bg-green-50">
+                      {fmt(r.sg15, 4)}
+                    </td>
+                    <td className="border border-slate-300 px-1 py-1 text-right bg-green-50">
+                      {fmt(r.sgCorrect, 4)}
+                    </td>
+                    <td className="border border-slate-300 px-1 py-1 text-right bg-green-50">
+                      {fmt(r.mt, 2)}
                     </td>
                     <td className="border border-slate-300 px-1 py-1 text-right">
-                      {fmt(row.volume, 2)}
+                      {r.presentPct != null ? `${fmt(r.presentPct, 2)}%` : ''}
                     </td>
-                    <td className="border border-slate-300 px-1 py-1 text-right text-blue-700">
-                      {fmt(row.temperature, 1)}
-                    </td>
-                    <td className="border border-slate-300 px-1 py-1 text-right text-blue-700">
-                      {fmt(row.sg, 4)}
-                    </td>
-                    <td className="border border-slate-300 px-1 py-1 text-right">
-                      {fmt(row.correctedSg, 4)}
-                    </td>
-                    <td className="border border-slate-300 px-1 py-1 text-right">
-                      {fmt(row.weight, 2)}
+                    <td className="border border-slate-300 px-1 py-1 text-left">
+                      <input
+                        className="w-full border border-slate-200 rounded px-1 py-0.5 text-[11px]"
+                        value={remarks[r.tankId] ?? ''}
+                        onChange={e =>
+                          setRemarks(prev => ({
+                            ...prev,
+                            [r.tankId]: e.target.value,
+                          }))
+                        }
+                        placeholder=""
+                      />
                     </td>
                   </tr>
                 ))}
                 <tr className="bg-slate-100 font-semibold">
-                  <td className="border border-slate-300 px-1 py-1" colSpan={4}>
+                  <td className="border border-slate-300 px-1 py-1 text-left">
                     TOTAL
                   </td>
                   <td className="border border-slate-300 px-1 py-1 text-right">
-                    {fmt(doTotals.totalVolume, 2)}
+                    {fmt(mgoTotals.totalCapacity, 0)}
                   </td>
                   <td className="border border-slate-300 px-1 py-1" />
                   <td className="border border-slate-300 px-1 py-1" />
                   <td className="border border-slate-300 px-1 py-1" />
                   <td className="border border-slate-300 px-1 py-1 text-right">
-                    {fmt(doTotals.totalWeight, 2)}
+                    {fmt(mgoTotals.totalVolume, 2)}
                   </td>
+                  <td className="border border-slate-300 px-1 py-1" />
+                  <td className="border border-slate-300 px-1 py-1" />
+                  <td className="border border-slate-300 px-1 py-1" />
+                  <td className="border border-slate-300 px-1 py-1 text-right">
+                    {fmt(mgoTotals.totalMt, 2)}
+                  </td>
+                  <td className="border border-slate-300 px-1 py-1" />
+                  <td className="border border-slate-300 px-1 py-1" />
                 </tr>
               </tbody>
             </table>
+
+            <div className="mt-2 text-[11px] flex flex-col items-end gap-1">
+              <div> Total: {fmt(mgoTotals.totalMt, 3)} MT</div>
+              <div> Log.: {fmt(mgoLog, 3)} MT</div>
+              <div> Diffo.: {fmt(mgoDiff, 3)} MT</div>
+            </div>
           </div>
         </div>
       </div>
